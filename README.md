@@ -1,47 +1,25 @@
-# bitw
+# vaultwarden to k8s secret
 
-A simple BitWarden client. Requires Go 1.19 or later.
+The goal is to get items from vaultwarden and to install in kubernetes as secrets..
 
-	go install mvdan.cc/bitw@latest
+```bash
+go install daniel-jantrambun/vaultwarden_to_k8s_secrets@latest
+```
 
-The goal is a static and portable client which integrates well with one's
-system. For example, on Linux it implements the `org.freedesktop.secrets` D-Bus
-service.
+## QuickStart
 
-Note that this tool is still a work in progress.
+Command
 
-#### Quickstart
+```bash
+export PASSWORD='YOUR_PASSWORD'
+export CLIENT_SECRET='YOUR_CLIENT_SECRET'
+vaultwarden_to_k8s_secrets export -collection="k8s/<YOUR_NAMESPACE>/" -email="<YOU_EMAIL_ADDRESS>" -url="https://<YOUR_VAULT_URL>/api" -idturl "https://<YOUR_VAULT_URL>/identity"  -clientId="<YOU_CLIENT_ID>"
+```
 
-Log in and sync, providing a password when asked:
+### Args
 
-	export EMAIL=you@domain.com
-	bitw sync
-
-You can then view your secrets:
-
-	bitw dump
-
-You can also start the D-Bus service, and use it:
-
-	bitw serve
-	secret-tool lookup name mysecret
-
-#### Non-goals
-
-These features are not planned at the moment:
-
-* A graphical interface - use `vault.bitwarden.com`
-* Querying secrets directly - use D-Bus clients like `secret-tool`
-* Integration with gnome-keyring - they both implement the same D-Bus service
-
-#### Further reading
-
-Talking to BitWarden:
-
-* https://github.com/jcs/rubywarden/blob/master/API.md
-* https://fossil.birl.ca/doc/trunk/docs/build/html/crypto.html
-
-Integrating with the OS:
-
-* https://specifications.freedesktop.org/secret-service/
-* https://www.chucknemeth.com/linux/security/keyring/secret-tool
+- collection : collection in vaultwarden. Collection's name must be formatted as `*_<namespace>`. The second element is the kubernetes `namespace``
+- email: your email to connect to your vaultwarden
+- url : you vaultwarden url
+- clientId: your client id may be found in your profile in vaultwarden : Account/API Key/View API Key
+- clientSecret (if not set in env or no arg, it will be asked): your client id may be found in your profile in vaultwarden : Account/API Key/View API Key

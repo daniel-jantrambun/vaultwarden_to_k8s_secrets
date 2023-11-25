@@ -1,3 +1,4 @@
+// Copyright (c) 2023, Benjamin Darnault <daniel.jantrambun@pm.me>
 // Copyright (c) 2019, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
@@ -5,68 +6,85 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"log/slog"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"time"
+	"strings"
 
-	"github.com/google/uuid"
-	"github.com/kenshaw/ini"
 	"golang.org/x/term"
 )
 
-var flagSet = flag.NewFlagSet("bitw", flag.ContinueOnError)
+type dataFile struct {
+	DeviceID       string
+	AccessToken    string
+	KDF            KDFType
+	KDFIterations  int
+	KDFMemory      int
+	KDFParallelism int
 
-func init() { flagSet.Usage = usage }
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `
-Usage of bitw:
-
-	bitw [command]
-
-Commands:
-
-	help    show a command's help text
-	sync    fetch the latest data from the server
-	login   force a new login, even if not necessary
-	dump    list all the stored login secrets
-	serve   start the org.freedesktop.secrets D-Bus service
-	config  print the current configuration
-`[1:])
-	flagSet.PrintDefaults()
+	Sync syncData
 }
 
-func main() { os.Exit(main1(os.Stderr)) }
-
-func main1(stderr io.Writer) int {
-	if err := flagSet.Parse(os.Args[1:]); err != nil {
-		return 2
-	}
-	args := flagSet.Args()
-	if err := run(args...); err != nil {
-		switch err {
-		case context.Canceled:
-			return 0
-		case flag.ErrHelp:
-			return 2
-		}
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	return 0
-}
-
-// These can be overriden by the config.
 var (
-	apiURL = "https://api.bitwarden.com"
-	idtURL = "https://identity.bitwarden.com"
+	globalData dataFile
+
+	secrets secretCache
+
+	apiURL string
+	idtURL string
 )
+
+func init() { secrets.data = &globalData }
+
+func newVaultK8sExportCommand() *vaultK8sExportCommand {
+	vkc := &vaultK8sExportCommand{
+		fs: flag.NewFlagSet("export", flag.ContinueOnError),
+	}
+
+	vkc.fs.StringVar(&vkc.email, "email", "", "vault user email")
+	vkc.fs.StringVar(&vkc.password, "password", "", "vault user password")
+	vkc.fs.StringVar(&vkc.URL, "url", "", "url of the vault server")
+	vkc.fs.StringVar(&vkc.idtURL, "idturl", "", "url of the vault server for identity")
+	vkc.fs.StringVar(&vkc.clientID, "clientId", "", "client ID for identity server")
+	vkc.fs.StringVar(&vkc.clientSecret, "clientSecret", "", "client Secret for identity server")
+	vkc.fs.StringVar(&vkc.collection, "collection", "", "collection")
+
+	return vkc
+}
+
+type vaultK8sExportCommand struct {
+	fs *flag.FlagSet
+
+	email        string
+	password     string
+	clientSecret string
+	clientID     string
+	URL          string
+	idtURL       string
+	collection   string
+
+	k8sSecrets []k8sSecret
+}
+
+type k8sSecretData struct {
+	key   string `yaml:"key"`
+	value string `yaml:"value"`
+}
+type k8sSecret struct {
+	name string          `yaml:"name"`
+	data []k8sSecretData `yaml:"data"`
+}
+
+func (g *vaultK8sExportCommand) Name() string {
+	return g.fs.Name()
+}
+
+func (g *vaultK8sExportCommand) Init(args []string) error {
+	return g.fs.Parse(args)
+}
 
 // readLine is similar to term.ReadPassword, but it doesn't use key codes.
 func readLine(prompt string) ([]byte, error) {
@@ -93,6 +111,38 @@ func readLine(prompt string) ([]byte, error) {
 	}
 }
 
+func (g *vaultK8sExportCommand) getClientSecret() error {
+	if g.clientSecret != "" {
+		return nil
+	}
+	if s := os.Getenv("CLIENT_SECRET"); s != "" {
+		g.clientSecret = s
+		return nil
+	}
+	clientSecret, err := passwordPrompt("Client Secret")
+	if err != nil {
+		return err
+	}
+	g.clientSecret = string(clientSecret[:])
+	return nil
+}
+
+func (g *vaultK8sExportCommand) getPassword() error {
+	if g.password != "" {
+		return nil
+	}
+	if s := os.Getenv("PASSWORD"); s != "" {
+		g.password = s
+		return nil
+	}
+	password, err := passwordPrompt("Vault password")
+	if err != nil {
+		return err
+	}
+	g.password = string(password[:])
+	return nil
+}
+
 func passwordPrompt(prompt string) ([]byte, error) {
 	// TODO: Support cancellation with ^C. Currently not possible in any
 	// simple way. Closing os.Stdin on cancel doesn't seem to do the trick
@@ -116,238 +166,87 @@ func passwordPrompt(prompt string) ([]byte, error) {
 	}
 }
 
-var (
-	config     *ini.File
-	globalData dataFile
-
-	saveData bool
-
-	secrets secretCache
-)
-
-func init() { secrets.data = &globalData }
-
-type dataFile struct {
-	path string
-
-	DeviceID       string
-	AccessToken    string
-	RefreshToken   string
-	TokenExpiry    time.Time
-	KDF            KDFType
-	KDFIterations  int
-	KDFMemory      int
-	KDFParallelism int
-
-	LastSync time.Time
-	Sync     SyncData
-}
-
-func loadDataFile(path string) error {
-	globalData.path = path
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := json.NewDecoder(f).Decode(&globalData); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (f *dataFile) Save() error {
-	bs, err := json.MarshalIndent(f, "", "\t")
+func (g *vaultK8sExportCommand) Run() error {
+	/*
+		1. Get a JWT token from the vault server
+		2. Get a list of all the secrets
+		3. For each secret, get the secret
+		4. Write the secret to a file
+	*/
+	err := g.getPassword()
 	if err != nil {
 		return err
 	}
-	bs = append(bs, '\n')
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
-		return err
-	}
-	return ioutil.WriteFile(f.path, bs, 0o600)
-}
-
-func run(args ...string) (err error) {
-	if len(args) == 0 {
-		flagSet.Usage()
-		return flag.ErrHelp
-	}
-	switch args[0] {
-	case "help":
-		// TODO: per-command help
-		flagSet.Usage()
-		return flag.ErrHelp
-	}
-	dir := os.Getenv("CONFIG_DIR")
-	if dir == "" {
-		if dir, err = os.UserConfigDir(); err != nil {
-			return err
-		}
-		dir = filepath.Join(dir, "bitw")
-	}
-	config, err = ini.LoadFile(filepath.Join(dir, "config"))
+	err = g.getClientSecret()
 	if err != nil {
 		return err
 	}
-	for _, section := range config.AllSections() {
-		if section.Name() != "" {
-			return fmt.Errorf("sections are not used in config files yet")
-		}
-		for _, key := range section.Keys() {
-			// note that these are lowercased
-			switch key {
-			case "email":
-				secrets._configEmail = section.Get(key)
-			case "apiurl":
-				apiURL = section.Get(key)
-			case "identityurl":
-				idtURL = section.Get(key)
-			default:
-				return fmt.Errorf("unknown config key: %q", key)
-			}
-		}
-	}
+	secrets._email = g.email
+	secrets._password = []byte(g.password)
+	secrets._clientSecret = []byte(g.clientSecret)
+	secrets._clientID = []byte(g.clientID)
 
-	dataPath := filepath.Join(dir, "data.json")
-	if err := loadDataFile(dataPath); err != nil {
-		return fmt.Errorf("could not load %s: %v", dataPath, err)
-	}
-
-	if args[0] == "config" {
-		fmt.Printf("email       = %q\n", secrets.email())
-		fmt.Printf("apiURL      = %q\n", apiURL)
-		fmt.Printf("identityURL = %q\n", idtURL)
-		return nil
-	}
-
-	defer func() {
-		if !saveData {
-			return
-		}
-		if err1 := globalData.Save(); err == nil {
-			err = err1
-		}
-	}()
-
-	if globalData.DeviceID == "" {
-		globalData.DeviceID = uuid.New().String()
-		saveData = true
-	}
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-
-	// If stdin is a terminal, ensure we reset its state before exiting.
-	stdinFD := int(os.Stdin.Fd())
-	stdinOldState, _ := term.GetState(stdinFD)
+	apiURL = g.URL
+	idtURL = g.idtURL
 
 	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-
-	go func() {
-		<-c
-		cancel()
-
-		// If we still haven't exited after 200ms,
-		// we're probably stuck reading a password.
-		// Unfortunately, term.ReadPassword can't be cancelled right now.
-		//
-		// The least we can do is restore the terminal to its original state,
-		// and exit the entire program.
-		// TODO: probably revisit this at some point.
-		time.Sleep(200 * time.Millisecond)
-		if stdinOldState != nil { // if nil, stdin is not a terminal
-			_ = term.Restore(stdinFD, stdinOldState)
-		}
-		fmt.Println()
-		os.Exit(0)
-	}()
-
-	ctx = context.WithValue(ctx, authToken{}, globalData.AccessToken)
-	switch args[0] {
-	case "login":
-		if err := login(ctx, false); err != nil {
-			return err
-		}
-	case "sync":
-		if err := ensureToken(ctx); err != nil {
-			return err
-		}
-		if err := sync(ctx); err != nil {
-			return err
-		}
-	case "dump":
-		// Make sure we have the password before printing anything.
-		if _, err := secrets.password(); err != nil {
-			return err
-		}
-
-		// Split the ciphers into categories, for printing.
-		// Don't use text/tabwriter, as deciphering hundreds can be slow.
-		// TODO: print non-login ciphers too, such as cards.
-		// TODO: use encoding/csv instead.
-		var logins []*Cipher
-		for i := range globalData.Sync.Ciphers {
-			cipher := &globalData.Sync.Ciphers[i]
-			if cipher.Login != nil {
-				logins = append(logins, cipher)
-			}
-		}
-		fmt.Println("# Logins:")
-		fmt.Println("name\turi\tusername\tpassword")
-		for _, cipher := range logins {
-			if ctx.Err() != nil {
-				break // cancelled
-			}
-			for i, cipherStr := range [...]CipherString{
-				cipher.Name,
-				cipher.Login.URI,
-				cipher.Login.Username,
-				cipher.Login.Password,
-			} {
-				if cipherStr.IsZero() {
-					continue
-				}
-
-				var s []byte
-				var err error
-
-				s, err = secrets.decrypt(cipherStr, cipher.OrganizationID)
-
-				if err != nil {
-					return err
-				}
-				if i > 0 && len(s) > 0 {
-					fmt.Printf("\t")
-				}
-				fmt.Printf("%s", s)
-			}
-			fmt.Println()
-		}
-	case "serve":
-		if err := serveDBus(ctx); err != nil {
-			return err
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n", args[0])
-		flagSet.Usage()
-		return flag.ErrHelp
+	if err := loginToVault(ctx, true); err != nil {
+		return err
 	}
+	ctx = context.WithValue(ctx, authToken{}, globalData.AccessToken)
+	if err := sync(ctx); err != nil {
+		return err
+	}
+	slog.Debug(fmt.Sprint("Profile name", secrets.data.Sync.Profile.Name))
+	currentNamespace := strings.Split(g.collection, "/")[1]
+
+	slog.Debug(fmt.Sprint("namespace ", currentNamespace))
+
+	collectionIDs, err := buildCollections(g.collection)
+	if err != nil {
+		slog.Error(fmt.Sprint("Error getting collections", err))
+	}
+	g.k8sSecrets, err = buildK8sSecrets(collectionIDs)
+	if err != nil {
+		fmt.Println("Error building k8s secrets", err)
+	}
+
+	err = setK8sSecrets(currentNamespace, g.k8sSecrets)
+	if err != nil {
+		slog.Error("Error setting k8s secrets", err)
+	}
+
 	return nil
 }
 
-func ensureToken(ctx context.Context) error {
-	if globalData.RefreshToken == "" {
-		if err := login(ctx, false); err != nil {
-			return err
-		}
-	} else if time.Now().After(globalData.TokenExpiry) {
-		if err := refreshToken(ctx); err != nil {
-			return err
+type runner interface {
+	Init([]string) error
+	Run() error
+	Name() string
+}
+
+func main() {
+	if err := root(os.Args[1:]); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+func root(args []string) error {
+	if len(args) < 1 {
+		return errors.New("You must pass a sub-command")
+	}
+	cmds := []runner{
+		newVaultK8sExportCommand(),
+	}
+
+	subcommand := os.Args[1]
+	for _, cmd := range cmds {
+		if cmd.Name() == subcommand {
+			cmd.Init(os.Args[2:])
+			return cmd.Run()
 		}
 	}
-	return nil
+	return fmt.Errorf("Unknown subcommand: %s", subcommand)
+
 }

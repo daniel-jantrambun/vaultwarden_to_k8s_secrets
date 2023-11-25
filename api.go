@@ -1,3 +1,4 @@
+// Copyright (c) 2023, Benjamin Darnault <daniel.jantrambun@pm.me>
 // Copyright (c) 2019, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
@@ -10,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -84,7 +84,7 @@ func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 		return err
 	}
 	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
 	}

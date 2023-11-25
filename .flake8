@@ -1,0 +1,2 @@
+[flake8]
+exclude = LICENSE, README.md, .gitignore, .git, .vscode, .pytest_cache, .mypy_cache, .venv, .idea, .vscode, .vs, .github, .gitattributes, .gitignore, .gitmodules, .travis.yml, .coveragerc, .gitlab-ci.yml, .pre-commit-config.y

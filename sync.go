@@ -1,3 +1,4 @@
+// Copyright (c) 2023, Benjamin Darnault <daniel.jantrambun@pm.me>
 // Copyright (c) 2019, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
@@ -14,44 +15,45 @@ import (
 	"github.com/google/uuid"
 )
 
-type SyncData struct {
-	Profile Profile
-	Folders []Folder
-	Ciphers []Cipher
+type syncData struct {
+	Profile     profile
+	Folders     []vaultFolder
+	Ciphers     []vaultCipher
+	Collections []vaultCollection
 }
 
-type CipherString struct {
-	Type CipherStringType
+type cipherString struct {
+	Type cipherStringType
 
 	IV, CT, MAC []byte
 }
 
-type CipherStringType int
+type cipherStringType int
 
 // Taken from https://github.com/bitwarden/jslib/blob/f30d6f8027055507abfdefd1eeb5d9aab25cc601/src/enums/encryptionType.ts
 const (
-	AesCbc256_B64                     CipherStringType = 0
-	AesCbc128_HmacSha256_B64          CipherStringType = 1
-	AesCbc256_HmacSha256_B64          CipherStringType = 2
-	Rsa2048_OaepSha256_B64            CipherStringType = 3
-	Rsa2048_OaepSha1_B64              CipherStringType = 4
-	Rsa2048_OaepSha256_HmacSha256_B64 CipherStringType = 5
-	Rsa2048_OaepSha1_HmacSha256_B64   CipherStringType = 6
+	AesCbc256B64                   cipherStringType = 0
+	AesCbc128HmacSha256B64         cipherStringType = 1
+	AesCbc256HmacSha256B64         cipherStringType = 2
+	Rsa2048OaepSha256B64           cipherStringType = 3
+	Rsa2048OaepSha1B64             cipherStringType = 4
+	Rsa2048OaepSha256HmacSha256B64 cipherStringType = 5
+	Rsa2048OaepSha1HmacSha256B64   cipherStringType = 6
 )
 
-func (t CipherStringType) HasMAC() bool {
-	return t != AesCbc256_B64
+func (t cipherStringType) HasMAC() bool {
+	return t != AesCbc256B64
 }
 
-func (s CipherString) IsZero() bool {
+func (s cipherString) IsZero() bool {
 	return s.Type == 0 && s.IV == nil && s.CT == nil && s.MAC == nil
 }
 
-func (s CipherString) MarshalText() ([]byte, error) {
+func (s cipherString) MarshalText() ([]byte, error) {
 	return []byte(s.String()), nil
 }
 
-func (s CipherString) String() string {
+func (s cipherString) String() string {
 	if s.IsZero() {
 		return ""
 	}
@@ -70,7 +72,7 @@ func (s CipherString) String() string {
 	)
 }
 
-func (s *CipherString) UnmarshalText(data []byte) error {
+func (s *cipherString) UnmarshalText(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -80,13 +82,14 @@ func (s *CipherString) UnmarshalText(data []byte) error {
 	}
 	typStr := string(data[:i])
 	var err error
-	if t, err := strconv.Atoi(typStr); err != nil {
+	var t int
+	if t, err = strconv.Atoi(typStr); err != nil {
 		return fmt.Errorf("invalid cipher string type: %q", typStr)
-	} else {
-		s.Type = CipherStringType(t)
 	}
+	s.Type = cipherStringType(t)
+
 	switch s.Type {
-	case AesCbc128_HmacSha256_B64, AesCbc256_HmacSha256_B64, AesCbc256_B64:
+	case AesCbc128HmacSha256B64, AesCbc256HmacSha256B64, AesCbc256B64:
 	default:
 		return fmt.Errorf("unsupported cipher string type: %d", s.Type)
 	}
@@ -126,16 +129,17 @@ func b64decode(src []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// Organization represents a Bitwarden organization.
 type Organization struct {
 	Object          string
-	Id              uuid.UUID
+	ID              uuid.UUID
 	Name            string
 	UseGroups       bool
 	UseDirectory    bool
 	UseEvents       bool
 	UseTotp         bool
 	Use2fa          bool
-	UseApi          bool
+	UseAPI          bool
 	UsersGetPremium bool
 	SelfHost        bool
 	Seats           int
@@ -147,7 +151,7 @@ type Organization struct {
 	Enabled         bool
 }
 
-type Profile struct {
+type profile struct {
 	ID                 uuid.UUID
 	Name               string
 	Email              string
@@ -156,85 +160,94 @@ type Profile struct {
 	MasterPasswordHint string
 	Culture            string
 	TwoFactorEnabled   bool
-	Key                CipherString
-	PrivateKey         CipherString
+	Key                cipherString
+	PrivateKey         cipherString
 	SecurityStamp      string
 	Organizations      []Organization
 }
 
-type Folder struct {
+type vaultFolder struct {
 	ID           uuid.UUID
 	Name         string
 	RevisionDate time.Time
 }
+type vaultCollection struct {
+	ID             *uuid.UUID
+	Name           cipherString
+	ExternalID     string
+	HidePassword   bool
+	Object         string
+	OrganizationID *uuid.UUID
+	ReadOnly       bool
+}
 
-type Cipher struct {
-	Type         CipherType
+type vaultCipher struct {
+	Type         cipherType
 	ID           uuid.UUID
-	Name         CipherString
+	Name         cipherString
 	Edit         bool
 	RevisionDate time.Time
 
 	// The rest of the fields are optional. Omit from the JSON if empty.
 
-	FolderID            *uuid.UUID  `json:",omitempty"`
-	OrganizationID      *uuid.UUID  `json:",omitempty"`
-	Favorite            bool        `json:",omitempty"`
-	Attachments         interface{} `json:",omitempty"`
-	OrganizationUseTotp bool        `json:",omitempty"`
-	CollectionIDs       []string    `json:",omitempty"`
-	Fields              []Field     `json:",omitempty"`
+	FolderID            *uuid.UUID   `json:",omitempty"`
+	OrganizationID      *uuid.UUID   `json:",omitempty"`
+	Favorite            bool         `json:",omitempty"`
+	Attachments         interface{}  `json:",omitempty"`
+	OrganizationUseTotp bool         `json:",omitempty"`
+	CollectionIDs       []*uuid.UUID `json:",omitempty"`
+	Fields              []field      `json:",omitempty"`
 
-	Card       *Card         `json:",omitempty"`
-	Identity   *Identity     `json:",omitempty"`
-	Login      *Login        `json:",omitempty"`
-	Notes      *CipherString `json:",omitempty"`
-	SecureNote *SecureNote   `json:",omitempty"`
+	Card       *card         `json:",omitempty"`
+	Identity   *identity     `json:",omitempty"`
+	Login      *login        `json:",omitempty"`
+	Notes      *cipherString `json:",omitempty"`
+	SecureNote *secureNote   `json:",omitempty"`
 }
 
-type CipherType int
+type cipherType int
 
 const (
-	_ CipherType = iota
-	CipherLogin
-	CipherCard
-	CipherIdentity
-	CipherNote
+	_ cipherType = iota
+	cipherLogin
+	cipherCard
+	cipherIdentity
+	cipherNote
 )
 
-type Card struct {
-	CardholderName CipherString
-	Brand          CipherString
-	Number         CipherString
-	ExpMonth       CipherString
-	ExpYear        CipherString
-	Code           CipherString
+type card struct {
+	CardholderName cipherString
+	Brand          cipherString
+	Number         cipherString
+	ExpMonth       cipherString
+	ExpYear        cipherString
+	Code           cipherString
 }
 
-type Identity struct {
-	Title      CipherString
-	FirstName  CipherString
-	MiddleName CipherString
-	LastName   CipherString
+type identity struct {
+	Title      cipherString
+	FirstName  cipherString
+	MiddleName cipherString
+	LastName   cipherString
 
-	Username       CipherString
-	Company        CipherString
-	SSN            CipherString
-	PassportNumber CipherString
-	LicenseNumber  CipherString
+	Username       cipherString
+	Company        cipherString
+	SSN            cipherString
+	PassportNumber cipherString
+	LicenseNumber  cipherString
 
-	Email      CipherString
-	Phone      CipherString
-	Address1   CipherString
-	Address2   CipherString
-	Address3   CipherString
-	City       CipherString
-	State      CipherString
-	PostalCode CipherString
-	Country    CipherString
+	Email      cipherString
+	Phone      cipherString
+	Address1   cipherString
+	Address2   cipherString
+	Address3   cipherString
+	City       cipherString
+	State      cipherString
+	PostalCode cipherString
+	Country    cipherString
 }
 
-func (c *Cipher) Match(attr, value string) bool {
+func (c *vaultCipher) Match(attr, value string) bool {
 	got := ""
 	var err error
 	switch attr {
@@ -254,41 +267,38 @@ func (c *Cipher) Match(attr, value string) bool {
 	return got == value
 }
 
-type Field struct {
-	Type  FieldType
-	Name  CipherString
-	Value CipherString
+type field struct {
+	Type  fieldType
+	Name  cipherString
+	Value cipherString
 }
 
-type FieldType int
+type fieldType int
 
-type Login struct {
-	Password CipherString
-	URI      CipherString
-	URIs     []URI
-	Username CipherString `json:",omitempty"`
+type login struct {
+	Password cipherString
+	URI      cipherString
+	URIs     []uri
+	Username cipherString `json:",omitempty"`
 	Totp     string       `json:",omitempty"`
 }
 
-type URI struct {
+type uri struct {
 	URI   string
-	Match URIMatch
+	Match uriMatch
 }
 
-type URIMatch int
+type uriMatch int
 
-type SecureNote struct {
-	Type SecureNoteType
+type secureNote struct {
+	Type secureNoteType
 }
 
-type SecureNoteType int
+type secureNoteType int
 
 func sync(ctx context.Context) error {
-	now := time.Now().UTC()
 	if err := jsonGET(ctx, apiURL+"/sync", &globalData.Sync); err != nil {
 		return fmt.Errorf("could not sync: %v", err)
 	}
-	globalData.LastSync = now
-	saveData = true
 	return nil
 }
