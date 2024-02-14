@@ -23,3 +23,5 @@ vaultwarden_to_k8s_secrets export -collection="k8s/<YOUR_NAMESPACE>/" -email="<Y
 - url : you vaultwarden url
 - clientId: your client id may be found in your profile in vaultwarden : Account/API Key/View API Key
 - clientSecret (if not set in env or no arg, it will be asked): your client id may be found in your profile in vaultwarden : Account/API Key/View API Key
+
+![alt text](./doc/API_key.png)
